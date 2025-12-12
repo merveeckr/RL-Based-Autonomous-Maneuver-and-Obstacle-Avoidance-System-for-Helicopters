@@ -1,1 +1,3 @@
-# RL-Based-Autonomous-Maneuver-and-Obstacle-Avoidance-System-for-Helicopters
+# Helicopter RL Autonomous Flight
+
+Project scaffold.
