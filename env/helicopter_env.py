@@ -24,6 +24,8 @@ class HelicopterEnv:
         self.prev = {
             "dist_to_target_prev": 0.0,
             "action_prev": np.zeros(self.action_dim, dtype=np.float32),
+            "roll_prev": None,
+            "pitch_prev": None,
         }
 
         self.domain_params = None
@@ -60,6 +62,10 @@ class HelicopterEnv:
         self.prev["dist_to_target_prev"] = self._compute_dist_to_target()
         self.prev["action_prev"] = np.zeros(self.action_dim, dtype=np.float32)
 
+        self.prev["roll_prev"] = None
+        self.prev["pitch_prev"] = None
+
+
         info = {"domain_params": self.domain_params}
         return obs, info  # gymnasium ise
         # return obs       # gym ise
@@ -77,14 +83,26 @@ class HelicopterEnv:
         min_d = self._compute_min_obstacle_dist()
         collision = self.sim.get_collision()
 
+        # NEW: attitude (if supported by sim)
+        if hasattr(self.sim, "get_attitude"):
+            roll, pitch, yaw = self.sim.get_attitude()
+        else:
+            roll, pitch = None, None
+
+
         info = {
             "dist_to_target": dist,
             "min_obstacle_dist": min_d,   # <-- ÖNEMLİ: bu isim
             "collision": collision,
-            "domain_params": self.domain_params
+            "domain_params": self.domain_params,
+
+            # NEW
+            "roll": roll,
+            "pitch": pitch,
         }
 
-        reward, done_reward = compute_reward(obs, action, info, self.prev, self.rcfg)
+        reward, done_reward, terms = compute_reward(obs, action, info, self.prev, self.rcfg)
+        info["reward_terms"] = terms
 
         done_timeout = (self.step_count >= self.max_steps)
         terminated = bool(done_reward)
@@ -93,6 +111,10 @@ class HelicopterEnv:
         # prev update
         self.prev["dist_to_target_prev"] = dist
         self.prev["action_prev"] = np.array(action, dtype=np.float32)
+
+        self.prev["roll_prev"] = roll
+        self.prev["pitch_prev"] = pitch
+
 
         return obs, reward, terminated, truncated, info
 
