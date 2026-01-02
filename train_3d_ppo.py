@@ -23,7 +23,7 @@ def make_env_3d(env_config, rank=0):
 
 
 def train_ppo_3d(
-    total_timesteps=200000,
+    total_timesteps=1000000,  # Artırıldı: 200000 → 1000000 (daha uzun eğitim)
     learning_rate=3e-4,
     n_steps=2048,
     batch_size=64,
@@ -44,12 +44,13 @@ def train_ppo_3d(
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(save_dir, exist_ok=True)
     
-    # Environment configuration
+    # Environment configuration - Cruise phase'e göre optimize edilmiş
     env_config = {
         'world_size': world_size,
         'num_obstacles': 1,  # Single fixed obstacle
         'max_episode_steps': 2000,
         'dt': 0.1,
+        'max_speed': 30.0,  # Cruise phase'e göre daha da düşürüldü (40 → 30, cruise phase'de hız çok düşük)
         'render_mode': None,
         'use_log_data': True,  # Use FlightGear log data for realistic helicopter behavior
         'log_data_path': 'fg_log2.csv',
@@ -76,23 +77,35 @@ def train_ppo_3d(
     print(f"Number of Obstacles: {num_obstacles}")
     print(f"\n[INFO] Using FlightGear log data: fg_log2.csv")
     print(f"       Episodes will start from realistic states from actual flight data!")
-    print("=" * 70)
+    print(f"       Cruise phase filtering enabled - only level flight data used")
     
-    # PPO hyperparameters
+    # PPO hyperparameters - Cruise phase'e göre optimize edilmiş
+    # Cruise phase'de yumuşak ve stabil davranış öğrenmek için
     ppo_config = {
-        'learning_rate': learning_rate,
-        'n_steps': n_steps,
-        'batch_size': batch_size,
-        'n_epochs': n_epochs,
-        'gamma': 0.99,
-        'gae_lambda': 0.95,
-        'clip_range': 0.2,
-        'ent_coef': 0.01,
+        'learning_rate': learning_rate if learning_rate != 3e-4 else 5e-5,  # Daha da düşük (1e-4 → 5e-5, daha yavaş ama daha iyi öğrenme)
+        'n_steps': n_steps if n_steps != 2048 else 4096,  # Daha uzun (daha fazla deneyim)
+        'batch_size': batch_size if batch_size != 64 else 128,  # Daha büyük (daha stabil gradient)
+        'n_epochs': n_epochs if n_epochs != 10 else 15,  # Daha fazla (daha iyi öğrenme)
+        'gamma': 0.995,  # Daha yüksek (uzun vadeli ödül - cruise phase'de stabilite önemli)
+        'gae_lambda': 0.98,  # Daha yüksek (daha smooth advantage - cruise phase'de yumuşak değişimler)
+        'clip_range': 0.15,  # Daha küçük (daha konservatif update - cruise phase'de küçük değişimler)
+        'ent_coef': 0.02,  # Daha yüksek (daha fazla exploration - cruise phase'de çeşitlilik)
         'vf_coef': 0.5,
         'max_grad_norm': 0.5,
         'verbose': 1,
         'tensorboard_log': log_dir
     }
+    
+    print(f"\n[INFO] Cruise phase optimized hyperparameters:")
+    print(f"       Learning rate: {ppo_config['learning_rate']}")
+    print(f"       N steps: {ppo_config['n_steps']}")
+    print(f"       Batch size: {ppo_config['batch_size']}")
+    print(f"       N epochs: {ppo_config['n_epochs']}")
+    print(f"       Gamma: {ppo_config['gamma']}")
+    print(f"       GAE lambda: {ppo_config['gae_lambda']}")
+    print(f"       Clip range: {ppo_config['clip_range']}")
+    print(f"       Entropy coef: {ppo_config['ent_coef']}")
+    print("=" * 70)
     
     # Create PPO agent
     model = PPO(
@@ -139,8 +152,8 @@ def train_ppo_3d(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train PPO agent for 3D flight control')
     
-    parser.add_argument('--total_timesteps', type=int, default=200000,
-                       help='Total training timesteps')
+    parser.add_argument('--total_timesteps', type=int, default=1000000,
+                       help='Total training timesteps (default: 1M for better learning)')
     parser.add_argument('--learning_rate', type=float, default=3e-4,
                        help='Learning rate')
     parser.add_argument('--num_obstacles', type=int, default=1,

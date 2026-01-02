@@ -119,10 +119,10 @@ class FlightControlEnv3D(gym.Env):
         max_speed: float = 50.0,  # m/s
         max_episode_steps: int = 2000,
         dt: float = 0.1,
-        collision_penalty: float = -100.0,
-        obstacle_penalty: float = -50.0,
-        goal_reward: float = 100.0,
-        progress_reward: float = 0.1,
+        collision_penalty: float = -2000.0,  # ÇOK artırıldı: collision'ı kesinlikle önlemek için (-500 → -2000)
+        obstacle_penalty: float = -500.0,   # Çok artırıldı: navigation için (-200 → -500)
+        goal_reward: float = 1000.0,         # Çok artırıldı: hedefe ulaşmayı ödüllendirmek için (500 → 1000)
+        progress_reward: float = 1.0,       # Çok artırıldı: navigation için (0.5 → 1.0)
         render_mode: Optional[str] = None,
         use_log_data: bool = False,  # Use FlightGear log data for initialization
         log_data_path: str = "fg_log2.csv",  # Path to log data
@@ -169,19 +169,30 @@ class FlightControlEnv3D(gym.Env):
         self.obstacle_speed = obstacle_speed
         self.target_behind_obstacle = target_behind_obstacle
         
-        # State space: [x, y, z, vx, vy, vz, roll, pitch, yaw, altitude_rate]
+        # State space: [x, y, z, vx, vy, vz, roll, pitch, yaw, altitude_rate, 
+        #               normalized_distance_to_target, target_direction_x, target_direction_y, target_direction_z,
+        #               normalized_obstacle_distance, obstacle_direction_x, obstacle_direction_y, obstacle_direction_z]
+        # 18D observation space (obstacle ve target bilgisi eklendi, tüm değerler normalize edildi)
         self.observation_space = spaces.Box(
             low=np.array([
                 -world_size[0]/2, -world_size[1]/2, 0.0,  # position
                 -max_speed, -max_speed, -max_speed,  # velocity
                 -90.0, -90.0, 0.0,  # attitude (roll, pitch, yaw)
-                -50.0  # altitude_rate
+                -50.0,  # altitude_rate
+                0.0,  # distance_to_target
+                -1.0, -1.0, -1.0,  # target_direction (normalized)
+                0.0,  # min_obstacle_distance
+                -1.0, -1.0, -1.0  # obstacle_direction (normalized)
             ], dtype=np.float32),
             high=np.array([
                 world_size[0]/2, world_size[1]/2, world_size[2],  # position
                 max_speed, max_speed, max_speed,  # velocity
                 90.0, 90.0, 360.0,  # attitude
-                50.0  # altitude_rate
+                50.0,  # altitude_rate
+                np.sqrt(world_size[0]**2 + world_size[1]**2 + world_size[2]**2),  # max distance_to_target
+                1.0, 1.0, 1.0,  # target_direction (normalized)
+                np.sqrt(world_size[0]**2 + world_size[1]**2 + world_size[2]**2),  # max obstacle_distance
+                1.0, 1.0, 1.0  # obstacle_direction (normalized)
             ], dtype=np.float32),
             dtype=np.float32
         )
@@ -203,6 +214,10 @@ class FlightControlEnv3D(gym.Env):
         self.episode_rewards = []
         self.last_distance_to_target = None
         
+        # Previous values for angular rate calculation
+        self.prev_roll = None
+        self.prev_pitch = None
+        
         # Log data for realistic initialization
         self.use_log_data = use_log_data
         self.log_states = None
@@ -211,11 +226,20 @@ class FlightControlEnv3D(gym.Env):
                 extractor = StateExtractor(collision_threshold=2.0)
                 df = extractor.load_data(log_data_path)
                 state_df = extractor.extract_states(df)
+                
+                # Filter out takeoff and landing phases - only use cruise (level flight)
+                print("[INFO] Filtering log data to cruise phase only...")
+                original_count = len(state_df)
+                state_df = extractor.filter_cruise_phase(state_df)
+                filtered_count = len(state_df)
+                print(f"[OK] Filtered: {original_count} -> {filtered_count} states "
+                      f"({filtered_count/original_count*100:.1f}% remaining)")
+                
                 # Store state vectors: [altitude_agl, roll, pitch, heading, altitude_rate]
                 self.log_states = state_df[['altitude_agl', 'roll', 'pitch', 'heading', 'altitude_rate']].values
-                # Also store longitude for x position approximation
-                self.log_longitude = df['Longitude'].values
-                print(f"[OK] Loaded {len(self.log_states)} states from {log_data_path}")
+                # Also store longitude for x position approximation (filtered)
+                self.log_longitude = df.loc[state_df.index, 'Longitude'].values
+                print(f"[OK] Loaded {len(self.log_states)} cruise phase states from {log_data_path}")
             except Exception as e:
                 print(f"[WARNING] Could not load log data: {e}. Using random initialization.")
                 self.use_log_data = False
@@ -495,6 +519,11 @@ class FlightControlEnv3D(gym.Env):
         self.step_count = 0
         self.episode_rewards = []
         
+        # Initialize previous values for angular rate calculation
+        self.prev_roll = self.attitude[0]
+        self.prev_pitch = self.attitude[1]
+        self.prev_obstacle_dist = self._get_min_obstacle_distance(self.position)
+        
         state = self._get_state()
         info = {
             'position': self.position.copy(),
@@ -505,13 +534,60 @@ class FlightControlEnv3D(gym.Env):
         return state, info
     
     def _get_state(self) -> np.ndarray:
-        """Get current state vector."""
-        return np.concatenate([
+        """Get current state vector with obstacle and target information."""
+        # Basic state
+        state = np.concatenate([
             self.position,
             self.velocity,
             self.attitude,
             [self.altitude_rate]
         ], dtype=np.float32)
+        
+        # Target information
+        if self.target_position is not None:
+            distance_to_target = np.linalg.norm(self.position - self.target_position)
+            target_direction = (self.target_position - self.position)
+            target_direction_norm = np.linalg.norm(target_direction)
+            if target_direction_norm > 0:
+                target_direction = target_direction / target_direction_norm
+            else:
+                target_direction = np.array([0.0, 0.0, 0.0])
+            # Normalize distance_to_target (0-1 range, closer = smaller)
+            max_possible_dist = np.sqrt(np.sum(self.world_size**2))
+            normalized_distance_to_target = min(1.0, distance_to_target / max_possible_dist)
+        else:
+            normalized_distance_to_target = 0.0
+            target_direction = np.array([0.0, 0.0, 0.0])
+        
+        # Obstacle information
+        min_obstacle_dist = self._get_min_obstacle_distance(self.position)
+        if len(self.obstacles) > 0 and min_obstacle_dist < float('inf'):
+            # Find closest obstacle
+            closest_obstacle = min(self.obstacles, 
+                                  key=lambda obs: obs.distance_to_obstacle(self.position))
+            obstacle_direction = (self.position - closest_obstacle.position)
+            obstacle_direction_norm = np.linalg.norm(obstacle_direction)
+            if obstacle_direction_norm > 0:
+                obstacle_direction = obstacle_direction / obstacle_direction_norm
+            else:
+                obstacle_direction = np.array([0.0, 0.0, 1.0])  # Default: up
+        else:
+            obstacle_direction = np.array([0.0, 0.0, 1.0])  # No obstacle: up
+        
+        # Normalize obstacle distance (0-1 range, closer = smaller)
+        max_possible_dist = np.sqrt(np.sum(self.world_size**2))
+        normalized_obstacle_dist = min(1.0, min_obstacle_dist / max_possible_dist) if min_obstacle_dist < float('inf') else 1.0
+        
+        # Concatenate all information
+        state = np.concatenate([
+            state,
+            [normalized_distance_to_target],  # Normalized distance
+            target_direction,
+            [normalized_obstacle_dist],
+            obstacle_direction
+        ], dtype=np.float32)
+        
+        return state
     
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         """Execute one step in the environment."""
@@ -522,9 +598,12 @@ class FlightControlEnv3D(gym.Env):
         roll_cmd, pitch_cmd, yaw_cmd, throttle_cmd = action
         
         # Update attitude (simplified dynamics)
-        self.attitude[0] += roll_cmd * 10.0 * self.dt  # Roll
-        self.attitude[1] += pitch_cmd * 10.0 * self.dt  # Pitch
-        self.attitude[2] += yaw_cmd * 20.0 * self.dt  # Yaw
+        # Cruise phase'e göre yumuşatılmış: daha yavaş attitude değişimleri
+        # Cruise phase'de roll/pitch değişimleri yavaş ve yumuşak
+        attitude_update_rate = 5.0  # Daha yavaş (cruise phase'e göre)
+        self.attitude[0] += roll_cmd * attitude_update_rate * self.dt  # Roll
+        self.attitude[1] += pitch_cmd * attitude_update_rate * self.dt  # Pitch
+        self.attitude[2] += yaw_cmd * 15.0 * self.dt  # Yaw (biraz daha hızlı olabilir)
         
         # Clamp attitude
         self.attitude[0] = np.clip(self.attitude[0], -90.0, 90.0)
@@ -537,10 +616,12 @@ class FlightControlEnv3D(gym.Env):
         yaw_rad = np.deg2rad(self.attitude[2])
         
         # Calculate acceleration based on attitude and throttle
-        # Simplified helicopter dynamics
-        forward_accel = throttle_cmd * 20.0 * np.cos(pitch_rad)
-        lateral_accel = throttle_cmd * 20.0 * np.sin(roll_rad) * np.cos(pitch_rad)
-        vertical_accel = throttle_cmd * 15.0 - 9.81  # Gravity compensation
+        # Simplified helicopter dynamics - Cruise phase'e göre yumuşatılmış
+        # Cruise phase'de hız değişimleri yavaş ve yumuşak
+        max_accel = 10.0  # Daha düşük (cruise phase'e göre)
+        forward_accel = throttle_cmd * max_accel * np.cos(pitch_rad)
+        lateral_accel = throttle_cmd * max_accel * np.sin(roll_rad) * np.cos(pitch_rad)
+        vertical_accel = throttle_cmd * 8.0 - 9.81  # Daha yavaş (cruise phase'e göre)
         
         # Update velocity
         self.velocity[0] += forward_accel * np.cos(yaw_rad) * self.dt
@@ -548,6 +629,11 @@ class FlightControlEnv3D(gym.Env):
         self.velocity[0] += lateral_accel * np.cos(yaw_rad + np.pi/2) * self.dt
         self.velocity[1] += lateral_accel * np.sin(yaw_rad + np.pi/2) * self.dt
         self.velocity[2] += vertical_accel * self.dt
+        
+        # Velocity damping (cruise phase'de sürtünme var)
+        # Helikopter havada sürtünme yaşar - cruise phase'e göre
+        damping_factor = 0.98  # Her step'te %2 kayıp
+        self.velocity *= damping_factor
         
         # Clamp velocity
         speed = np.linalg.norm(self.velocity)
@@ -570,24 +656,138 @@ class FlightControlEnv3D(gym.Env):
         if collision:
             reward += self.collision_penalty
         else:
-            # Progress reward (getting closer to target)
+            # Progress reward (getting closer to target) - ÇOK GÜÇLENDİRİLDİ
             distance_to_target = np.linalg.norm(self.position - self.target_position)
             progress = self.last_distance_to_target - distance_to_target
-            reward += self.progress_reward * progress
+            if progress > 0:  # Sadece ilerleme varsa ödüllendir
+                # Distance'a göre scale et (yakınsa daha fazla ödül)
+                distance_factor = max(0.5, 1.0 - distance_to_target / 500.0)  # 500m'den uzaksa azalt
+                # Progress reward'ı çok artır (20x multiplier, 10 → 20)
+                reward += self.progress_reward * progress * 20.0 * distance_factor
             self.last_distance_to_target = distance_to_target
             
-            # Goal reward
+            # Goal reward - ÇOK GÜÇLENDİRİLDİ
             if distance_to_target < 10.0:  # Within 10m of target
                 reward += self.goal_reward
+            elif distance_to_target < 50.0:  # Hedefe yakınsa bonus
+                proximity_bonus = 5.0 * (1.0 - distance_to_target / 50.0)  # Artırıldı: 2.0 → 5.0
+                reward += proximity_bonus
+            elif distance_to_target < 100.0:  # Orta mesafe bonus
+                proximity_bonus = 2.0 * (1.0 - distance_to_target / 100.0)  # Artırıldı: 0.5 → 2.0
+                reward += proximity_bonus
+            elif distance_to_target < 200.0:  # Uzak mesafe bonus (yeni)
+                proximity_bonus = 0.5 * (1.0 - distance_to_target / 200.0)
+                reward += proximity_bonus
             
-            # Obstacle avoidance (penalty for getting too close)
+            # Obstacle avoidance (penalty for getting too close) - ÇOK GÜÇLENDİRİLDİ
+            # ÖNCE obstacle kontrolü (collision'dan önce)
             min_obstacle_dist = self._get_min_obstacle_distance(self.position)
-            if min_obstacle_dist < 20.0:
-                reward += self.obstacle_penalty * (1.0 - min_obstacle_dist / 20.0)
             
-            # Stability reward (small attitude angles)
-            attitude_penalty = -0.01 * (abs(self.attitude[0]) + abs(self.attitude[1]))
-            reward += attitude_penalty
+            # Stability weight: obstacle'a yakınsa navigation öncelikli, uzaksa stability önemli
+            stability_weight = 1.0
+            if min_obstacle_dist < 100.0:  # Obstacle'a yakınsa stability weight'i azalt (80 → 100)
+                stability_weight = 0.1  # Navigation öncelikli (0.2 → 0.1, çok daha agresif)
+            
+            # Çok agresif obstacle avoidance - DAHA DA GÜÇLENDİRİLDİ
+            if min_obstacle_dist < 100.0:  # 80 → 100 (çok daha erken uyarı)
+                # Exponential penalty (yaklaştıkça çok daha büyük) - 3x multiplier (2x → 3x)
+                obstacle_penalty_scaled = self.obstacle_penalty * 3.0 * np.exp(-min_obstacle_dist / 15.0)  # 20 → 15 (daha agresif)
+                reward += obstacle_penalty_scaled
+                
+                # Çok yakınsa çok büyük penalty - 3x artırıldı
+                if min_obstacle_dist < 50.0:  # Yeni threshold
+                    reward += -300.0 * (1.0 - min_obstacle_dist / 50.0)
+                if min_obstacle_dist < 40.0:
+                    reward += -600.0 * (1.0 - min_obstacle_dist / 40.0)  # 200 → 600
+                if min_obstacle_dist < 30.0:
+                    reward += -1000.0 * (1.0 - min_obstacle_dist / 30.0)  # 400 → 1000
+                if min_obstacle_dist < 20.0:
+                    reward += -1500.0 * (1.0 - min_obstacle_dist / 20.0)  # 600 → 1500
+                if min_obstacle_dist < 15.0:
+                    reward += -2000.0 * (1.0 - min_obstacle_dist / 15.0)  # 800 → 2000
+            
+            # Obstacle'dan uzaklaşırsa bonus (kaçınma ödülü) - ÇOK GÜÇLENDİRİLDİ
+            if hasattr(self, 'prev_obstacle_dist'):
+                obstacle_escape = min_obstacle_dist - self.prev_obstacle_dist
+                if obstacle_escape > 0 and min_obstacle_dist < 100.0:  # Uzaklaşıyorsa ve yakınsa (80 → 100)
+                    # Uzaklaşma ödülünü çok artır (20x, 10 → 20)
+                    reward += 20.0 * obstacle_escape
+                # Obstacle'dan uzakta kalırsa da bonus (safe distance reward)
+                if min_obstacle_dist > 100.0 and min_obstacle_dist < 200.0:  # 80-150 → 100-200
+                    reward += 1.0  # Safe distance bonus (0.5 → 1.0)
+            self.prev_obstacle_dist = min_obstacle_dist
+            
+            # Cruise phase'e göre stability reward
+            # Cruise phase'de roll mean=0.17°, std=12.63°, pitch mean=0.11°, std=3.05°
+            cruise_roll_mean = 0.17
+            cruise_roll_std = 12.63
+            cruise_pitch_mean = 0.11
+            cruise_pitch_std = 3.05
+            
+            # Roll stability reward (cruise phase'e benzer) - Weight ile scale et
+            roll_error = abs(self.attitude[0] - cruise_roll_mean)
+            roll_reward = -0.3 * stability_weight * (roll_error / max(cruise_roll_std, 5.0)) ** 2
+            reward += roll_reward
+            
+            # Pitch stability reward (cruise phase'e benzer) - Weight ile scale et
+            pitch_error = abs(self.attitude[1] - cruise_pitch_mean)
+            pitch_reward = -0.4 * stability_weight * (pitch_error / max(cruise_pitch_std, 2.0)) ** 2
+            reward += pitch_reward
+            
+            # Altitude rate stability reward (cruise phase'e benzer) - Weight ile scale et
+            # Cruise phase'de altitude_rate mean=0.71 m/s, std=2.34 m/s
+            cruise_rate_mean = 0.71
+            cruise_rate_std = 2.34
+            rate_error = abs(self.altitude_rate - cruise_rate_mean)
+            rate_reward = -0.2 * stability_weight * (rate_error / max(cruise_rate_std, 1.0)) ** 2
+            reward += rate_reward
+            
+            # Speed stability reward (cruise phase'de hız düşük) - Weight ile scale et
+            speed = np.linalg.norm(self.velocity)
+            cruise_speed_target = 5.0  # Cruise phase'de daha düşük hız hedefi (20 → 5)
+            speed_error = abs(speed - cruise_speed_target)
+            speed_reward = -0.15 * stability_weight * (speed_error / 5.0) ** 2
+            reward += speed_reward
+            
+            # Mean'e özel bonus reward (cruise phase mean'ine yakınsa bonus)
+            # Roll mean bonus
+            if abs(self.attitude[0]) < 2.0:  # Roll mean cruise phase'e yakın (±2°)
+                roll_mean_bonus = 0.05
+                reward += roll_mean_bonus
+            
+            # Pitch mean bonus
+            if abs(self.attitude[1]) < 1.0:  # Pitch mean cruise phase'e yakın (±1°)
+                pitch_mean_bonus = 0.05
+                reward += pitch_mean_bonus
+            
+            # Altitude rate mean bonus
+            if abs(self.altitude_rate - cruise_rate_mean) < 1.0:  # Altitude rate mean cruise phase'e yakın
+                rate_mean_bonus = 0.1
+                reward += rate_mean_bonus
+            
+            # Speed bonus (cruise phase'de hız çok düşük)
+            if speed < 5.0:  # Speed cruise phase'e yakın (<5 m/s)
+                speed_bonus = 0.1
+                reward += speed_bonus
+            
+            # Angular rate smoothness (cruise phase'de yumuşak değişimler) - AĞIRLIK ARTIRILDI
+            if hasattr(self, 'prev_roll') and hasattr(self, 'prev_pitch'):
+                roll_rate = abs(self.attitude[0] - self.prev_roll) / self.dt
+                pitch_rate = abs(self.attitude[1] - self.prev_pitch) / self.dt
+                
+                # Cruise phase'de angular rate düşük
+                cruise_roll_rate = 6.31  # Cruise phase'den tahmin
+                cruise_pitch_rate = 1.52
+                
+                roll_rate_error = abs(roll_rate - cruise_roll_rate)
+                pitch_rate_error = abs(pitch_rate - cruise_pitch_rate)
+                
+                rate_smoothness = -0.05 * (roll_rate_error / 10.0 + pitch_rate_error / 5.0)  # 0.02 → 0.05 (2.5x)
+                reward += rate_smoothness
+            
+            # Store previous values for next step
+            self.prev_roll = self.attitude[0]
+            self.prev_pitch = self.attitude[1]
         
         self.episode_rewards.append(reward)
         self.step_count += 1

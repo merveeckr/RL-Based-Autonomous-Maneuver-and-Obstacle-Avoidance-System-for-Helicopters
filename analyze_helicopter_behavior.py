@@ -18,16 +18,19 @@ import argparse
 class HelicopterBehaviorAnalyzer:
     """Analyze and compare agent behavior with real helicopter data."""
     
-    def __init__(self, model_path: str, log_data_path: str = "fg_log2.csv"):
+    def __init__(self, model_path: str, log_data_path: str = "fg_log2.csv", 
+                 filter_flight_phases: bool = True):
         """
         Initialize analyzer.
         
         Args:
             model_path: Path to trained PPO model
             log_data_path: Path to FlightGear log data
+            filter_flight_phases: If True, filter out takeoff and landing phases
         """
         self.model_path = model_path
         self.log_data_path = log_data_path
+        self.filter_flight_phases = filter_flight_phases
         
         # Load model
         if os.path.exists(model_path):
@@ -42,7 +45,26 @@ class HelicopterBehaviorAnalyzer:
         self.log_states = self.extractor.extract_states(self.log_df)
         print(f"[OK] Log data loaded: {len(self.log_states)} states")
         
-        # Statistics from log data
+        # Identify and filter flight phases
+        if filter_flight_phases:
+            print("\n[INFO] Identifying flight phases...")
+            self.log_states = self.extractor.identify_flight_phases(self.log_states)
+            
+            # Show phase distribution
+            phase_counts = self.log_states['flight_phase'].value_counts()
+            print(f"[INFO] Flight phase distribution:")
+            for phase, count in phase_counts.items():
+                print(f"  {phase}: {count} samples ({count/len(self.log_states)*100:.1f}%)")
+            
+            # Filter to cruise only
+            print("\n[INFO] Filtering to cruise (level flight) phase only...")
+            original_count = len(self.log_states)
+            self.log_states = self.extractor.filter_cruise_phase(self.log_states)
+            filtered_count = len(self.log_states)
+            print(f"[OK] Filtered: {original_count} -> {filtered_count} samples "
+                  f"({filtered_count/original_count*100:.1f}% remaining)")
+        
+        # Statistics from filtered log data
         self.log_stats = self._compute_log_statistics()
         
     def _compute_log_statistics(self) -> Dict:
@@ -610,11 +632,16 @@ def main():
                        help='Number of episodes to analyze')
     parser.add_argument('--output_dir', type=str, default='./behavior_analysis/',
                        help='Output directory for analysis results')
+    parser.add_argument('--filter_phases', action='store_true', default=True,
+                       help='Filter out takeoff and landing phases (default: True)')
+    parser.add_argument('--no_filter_phases', dest='filter_phases', action='store_false',
+                       help='Do not filter flight phases')
     
     args = parser.parse_args()
     
     # Create analyzer
-    analyzer = HelicopterBehaviorAnalyzer(args.model_path, args.log_data)
+    analyzer = HelicopterBehaviorAnalyzer(args.model_path, args.log_data, 
+                                         filter_flight_phases=args.filter_phases)
     
     # Collect agent trajectories
     agent_df = analyzer.collect_agent_trajectory(n_episodes=args.n_episodes)

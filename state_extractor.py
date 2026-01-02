@@ -133,6 +133,65 @@ class StateExtractor:
             True if state is valid
         """
         return np.all(np.isfinite(state))
+    
+    def identify_flight_phases(self, state_df: pd.DataFrame, 
+                              altitude_rate_threshold: float = 5.0,
+                              min_cruise_altitude: float = 50.0) -> pd.DataFrame:
+        """
+        Identify flight phases: takeoff, cruise, landing.
+        
+        Args:
+            state_df: DataFrame with state columns
+            altitude_rate_threshold: Maximum altitude_rate for level flight (m/s)
+            min_cruise_altitude: Minimum altitude to consider as cruise (meters)
+            
+        Returns:
+            DataFrame with 'flight_phase' column added
+        """
+        state_df = state_df.copy()
+        
+        # Identify phases based on altitude_rate and altitude
+        conditions = [
+            # Takeoff: high positive altitude_rate OR low altitude with positive rate
+            (state_df['altitude_rate'] > altitude_rate_threshold) | 
+            ((state_df['altitude_agl'] < min_cruise_altitude) & (state_df['altitude_rate'] > 0)),
+            
+            # Landing: high negative altitude_rate OR low altitude with negative rate
+            (state_df['altitude_rate'] < -altitude_rate_threshold) |
+            ((state_df['altitude_agl'] < min_cruise_altitude) & (state_df['altitude_rate'] < 0)),
+            
+            # Cruise: everything else (level flight)
+            True
+        ]
+        
+        choices = ['takeoff', 'landing', 'cruise']
+        state_df['flight_phase'] = np.select(conditions, choices, default='cruise')
+        
+        return state_df
+    
+    def filter_cruise_phase(self, state_df: pd.DataFrame, 
+                           altitude_rate_threshold: float = 5.0,
+                           min_altitude: float = 50.0) -> pd.DataFrame:
+        """
+        Filter to keep only cruise (level flight) phase.
+        Removes takeoff and landing phases.
+        
+        Args:
+            state_df: DataFrame with state columns
+            altitude_rate_threshold: Maximum altitude_rate for level flight (m/s)
+            min_altitude: Minimum altitude to consider (meters)
+        
+        Returns:
+            Filtered DataFrame with only cruise/level flight data
+        """
+        # Filter: altitude_rate should be low (level flight)
+        # AND altitude should be above minimum (already in flight)
+        filtered = state_df[
+            (state_df['altitude_rate'].abs() <= altitude_rate_threshold) &
+            (state_df['altitude_agl'] >= min_altitude)
+        ].copy()
+        
+        return filtered
 
 
 
