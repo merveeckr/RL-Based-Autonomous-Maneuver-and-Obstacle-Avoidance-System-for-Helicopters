@@ -1,0 +1,74 @@
+
+HELICOPTER BEHAVIOR ANALYSIS REPORT
+===================================
+Generated from: ./models_3d/cruise_nav_obs_aware_best/best_model.zip
+Log Data: fg_log2.csv
+
+FOCUS: Technical Characteristics (Angles, Rates, Velocities)
+NOT INCLUDED: Altitude (different operational scales)
+
+1. STATISTICAL COMPARISON
+-------------------------
+Overall Similarity Score: 39.8%
+
+Roll Angle:
+  Real Helicopter: mean=0.17°, std=12.63°
+  Agent:          mean=5.00°, std=6.68°
+  Similarity:     61.7% (mean), 52.9% (std)
+
+Pitch Angle:
+  Real Helicopter: mean=0.11°, std=3.05°
+  Agent:          mean=3.54°, std=3.64°
+  Similarity:     0.0% (mean), 80.7% (std)
+
+Altitude Rate:
+  Real Helicopter: mean=0.71m/s, std=2.34m/s
+  Agent:          mean=-4.86m/s, std=2.57m/s
+  Similarity:     0.0% (mean), 95.4% (std)
+
+Speed:
+  Real Helicopter (est): mean=1.43m/s
+  Agent:                 mean=28.82m/s
+  Similarity:            0.0%
+
+Angular Rates:
+  Roll Rate:
+    Real Helicopter (est): 6.31°/s
+    Agent:                 0.83°/s
+    Similarity:            13.2%
+  Pitch Rate:
+    Real Helicopter (est): 1.52°/s
+    Agent:                 0.46°/s
+    Similarity:            46.8%
+
+2. FLIGHT DYNAMICS
+------------------
+Average Speed: 28.82 m/s
+Max Speed: 46.05 m/s
+Roll Stability (avg |roll|): 5.00°
+Pitch Stability (avg |pitch|): 3.54°
+Altitude Variance: 19.39m
+
+3. BEHAVIOR ASSESSMENT
+----------------------
+❌ Agent technical behavior DIFFERS from real helicopter.
+   Significant improvements needed.
+
+4. RECOMMENDATIONS
+------------------
+- Improve roll angle control for more realistic banking
+- Improve pitch angle control for more realistic climbing/descending
+- Improve altitude rate control for smoother altitude changes
+
+5. LOG DATA USAGE
+-----------------
+Current log data provides:
+- Realistic initial states (attitude, velocity)
+- Real helicopter flight patterns for comparison
+- Validation baseline for agent behavior
+
+To improve agent behavior:
+- Use more diverse log data (different flight scenarios)
+- Increase training time with log data initialization
+- Fine-tune reward function to encourage realistic dynamics
+- Focus on matching angular rates and attitude stability

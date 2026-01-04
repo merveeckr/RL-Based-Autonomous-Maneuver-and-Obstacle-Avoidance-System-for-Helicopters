@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Models and Checkpoints (büyük dosyalar)
+models_3d/
+*.zip
+*.pth
+*.pt
+*.h5
+
+# Logs and TensorBoard
+logs_3d/
+logs/
+*.tfevents.*
+*.npz
+
+# Data files (büyük CSV dosyaları - isteğe bağlı)
+# fg_log2.csv
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Python cache
+*.pyc
+*.pyo
+
+# Temporary files
+*.tmp
+*.log
+
